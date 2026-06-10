@@ -5,9 +5,12 @@ import argparse
 import curses
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, List
@@ -15,18 +18,25 @@ from typing import Callable, Iterable, List
 
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".lrf", ".ts", ".mts"}
 SORTED_DIRS = {"mp4": "MP4", "lrf": "LRF", "other": "OTHER", "low": "LOW_QUALITY"}
-INDEX_NAME = ".blake3"
+INDEX_NAME = ".b3"
 SCRIPT_NAME = Path(__file__).name
-SIZE_KEEP_RATIO = 0.95
-COMPRESSED_TAG = ".av1"
+WEBUI_FILES = {"webui.py", "index.html"}
+SIZE_KEEP_RATIO = 0.90
+COMPRESSED_TAG = "_av1"
+NOT_COMPRESSED_TAG = "_oth"
+STORED_TAGS = (COMPRESSED_TAG, NOT_COMPRESSED_TAG)
 
 
 def compressed_companion_path(source: Path, output_dir: Path) -> Path:
     return output_dir / f"{source.stem}{COMPRESSED_TAG}{source.suffix}"
 
 
+def oth_companion_path(source: Path, output_dir: Path) -> Path:
+    return output_dir / f"{source.stem}{NOT_COMPRESSED_TAG}{source.suffix}"
+
+
 def is_compressed_output(file_path: Path) -> bool:
-    return file_path.stem.endswith(COMPRESSED_TAG)
+    return file_path.stem.endswith(STORED_TAGS)
 
 
 @dataclass
@@ -84,14 +94,16 @@ def iter_files(
     root: Path,
     include_managed: bool = False,
     skip_dirs: Iterable[str] | None = None,
+    skip_names: set[str] | None = None,
 ) -> Iterable[Path]:
     skip = set(skip_dirs or ())
+    skip_set = {INDEX_NAME, SCRIPT_NAME, *WEBUI_FILES} | (skip_names or set())
     for path in root.rglob("*"):
         if not path.is_file():
             continue
-        if path.name == INDEX_NAME:
+        if path.name in skip_set:
             continue
-        if path.name == SCRIPT_NAME:
+        if path.suffix in {".log", ".b3"}:
             continue
         if not include_managed and is_managed_path(path, root):
             continue
@@ -121,6 +133,18 @@ def unique_destination(dest_dir: Path, src: Path, create_dir: bool = True) -> Pa
         i += 1
 
 
+def _verify_same_file(file_path: Path, original_stat: os.stat_result) -> bool:
+    try:
+        st = file_path.stat()
+    except OSError:
+        return False
+    return (
+        not file_path.is_symlink()
+        and st.st_ino == original_stat.st_ino
+        and st.st_dev == original_stat.st_dev
+    )
+
+
 def _find_duplicate(dst_dir: Path, src: Path) -> Path | None:
     """Find a file in dst_dir whose blake3 hash matches src. Size is checked first
     to short-circuit the vast majority of mismatches without hashing."""
@@ -134,13 +158,25 @@ def _find_duplicate(dst_dir: Path, src: Path) -> Path | None:
             continue
         if candidate.name in {INDEX_NAME, SCRIPT_NAME}:
             continue
+        if candidate.samefile(src):
+            continue
         try:
             if candidate.stat().st_size != src_size:
                 continue
         except OSError:
             continue
         if src_hash is None:
-            src_hash = hash_with_b3sum(src)
+            if src.is_symlink():
+                return None
+            try:
+                src_hash = hash_with_b3sum(src)
+            except RuntimeError:
+                return None
+            try:
+                if src.stat().st_size != src_size:
+                    return None
+            except OSError:
+                return None
         try:
             if hash_with_b3sum(candidate) == src_hash:
                 return candidate
@@ -191,20 +227,23 @@ def emit_progress(progress: ProgressCallback | None, current: int, total: int, d
 
 
 def ffprobe_duration(file_path: Path) -> float | None:
-    proc = subprocess.run(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(file_path),
-        ],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        proc = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(file_path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return None
     if proc.returncode != 0:
         return None
     try:
@@ -214,22 +253,25 @@ def ffprobe_duration(file_path: Path) -> float | None:
 
 
 def ffprobe_video_codec(file_path: Path) -> str | None:
-    proc = subprocess.run(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=codec_name",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(file_path),
-        ],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        proc = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_name",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(file_path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return None
     if proc.returncode != 0:
         return None
     codec = proc.stdout.strip().lower()
@@ -275,20 +317,23 @@ class VideoInfo:
 
 
 def ffprobe_video_info(file_path: Path) -> VideoInfo:
-    proc = subprocess.run(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_format",
-            "-show_streams",
-            "-of",
-            "json",
-            str(file_path),
-        ],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        proc = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_format",
+                "-show_streams",
+                "-of",
+                "json",
+                str(file_path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return VideoInfo()
     info = VideoInfo()
     if proc.returncode != 0:
         return info
@@ -479,9 +524,12 @@ def filter_low_quality_videos(
             emit_progress(progress, idx, total, file_path.name)
             continue
         duration = ffprobe_duration(file_path)
-        if duration is None or duration <= threshold:
+        if duration is None:
+            emit_progress(progress, idx, total, file_path.name)
+            continue
+        if duration <= threshold:
             new_path = unique_destination(dst_dir, file_path, create_dir=not dry_run)
-            reason = "corrupt" if duration is None else f"duration={duration:.3f}s"
+            reason = f"duration={duration:.3f}s"
             if dry_run:
                 logger(f"would quarantine: {file_path} -> {new_path} ({reason})")
             else:
@@ -492,13 +540,22 @@ def filter_low_quality_videos(
     return quarantined
 
 
+def _read_stderr(stream, out: list) -> None:
+    if stream is None:
+        return
+    for line in stream:
+        line = line.rstrip("\n")
+        if line:
+            out.append(line)
+
+
 def compress_mp4_with_vaapi(
     file_path: Path,
     device: str,
     logger=print,
     dry_run: bool = False,
     output_dir: Path | None = None,
-    keep_original: bool = False,
+    keep_original: bool = True,
     file_index: int = 0,
     file_total: int = 0,
     file_progress: FileProgressCallback | None = None,
@@ -521,7 +578,13 @@ def compress_mp4_with_vaapi(
         logger(f"failed: {file_path} ({exc})")
         return False
     output_dir.mkdir(parents=True, exist_ok=True)
-    temp_path = output_dir / f"{file_path.stem}_temp_av1{file_path.suffix}"
+    tmp_fd, temp_path_str = tempfile.mkstemp(
+        suffix=file_path.suffix,
+        dir=str(output_dir),
+        prefix=f"{file_path.stem}_temp_",
+    )
+    os.close(tmp_fd)
+    temp_path = Path(temp_path_str)
     cmd = _build_compress_cmd(file_path, device, info, temp_path)
 
     total_us = _ffmpeg_total_us(info.duration) or 0
@@ -549,26 +612,38 @@ def compress_mp4_with_vaapi(
         )
     except OSError as exc:
         logger(f"failed: {file_path} ({exc})")
+        temp_path.unlink(missing_ok=True)
         return False
 
-    assert proc.stdout is not None
-    for raw in proc.stdout:
-        line = raw.strip()
-        if not line:
-            continue
-        if line.startswith("out_time_us="):
-            try:
-                ts = int(line.split("=", 1)[1])
-            except ValueError:
+    if proc.stdout is None:
+        logger(f"failed: {file_path} (could not capture stdout)")
+        proc.kill()
+        proc.wait()
+        temp_path.unlink(missing_ok=True)
+        return False
+    stderr_thread = threading.Thread(target=_read_stderr, args=(proc.stderr, stderr_lines), daemon=True)
+    stderr_thread.start()
+    try:
+        for raw in proc.stdout:
+            line = raw.strip()
+            if not line:
                 continue
-            _emit(ts)
-        elif line == "progress=end":
-            _emit(total_us)
-    assert proc.stderr is not None
-    stderr_text = proc.stderr.read()
-    proc.wait()
-    if stderr_text:
-        stderr_lines = [ln for ln in stderr_text.splitlines() if ln.strip()]
+            if line.startswith("out_time_us="):
+                try:
+                    ts = int(line.split("=", 1)[1])
+                except ValueError:
+                    continue
+                _emit(ts)
+            elif line == "progress=end":
+                _emit(total_us)
+        proc.wait()
+        stderr_thread.join()
+    except (Exception, KeyboardInterrupt):
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        temp_path.unlink(missing_ok=True)
+        raise
 
     if file_progress is not None and total_us > 0:
         file_progress(file_index, file_total, total_us, total_us, file_path.name)
@@ -587,9 +662,35 @@ def compress_mp4_with_vaapi(
         if new_size >= original_size * SIZE_KEEP_RATIO:
             temp_path.unlink()
             logger(
-                f"skipped: {file_path} (output not smaller: {new_size}B >= {original_size}B * {SIZE_KEEP_RATIO})"
+                f"output not smaller: {new_size}B >= {original_size}B * {SIZE_KEEP_RATIO}, keeping original"
             )
-            return False
+            if not _verify_same_file(file_path, original_stat):
+                logger(f"failed: {file_path} (file replaced during compression)")
+                return False
+            if keep_original:
+                final_path = oth_companion_path(file_path, output_dir)
+                if final_path.exists():
+                    logger(f"skipped: {file_path} (companion exists: {final_path.name})")
+                    return False
+                shutil.copy2(file_path, final_path)
+            elif output_dir != file_path.parent:
+                final_path = unique_destination(output_dir, file_path)
+                try:
+                    shutil.move(str(file_path), str(final_path))
+                except OSError as exc:
+                    logger(f"failed: {file_path} -> {final_path} ({exc})")
+                    return False
+            else:
+                final_path = file_path
+            try:
+                os.utime(
+                    final_path,
+                    ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+                )
+            except OSError as exc:
+                logger(f"warning: could not restore mtime on {final_path} ({exc})")
+            logger(f"kept original: {file_path} -> {final_path} ({original_size}B)")
+            return True
         if keep_original:
             final_path = compressed_companion_path(file_path, output_dir)
             if final_path.exists():
@@ -600,9 +701,14 @@ def compress_mp4_with_vaapi(
         elif output_dir != file_path.parent:
             final_path = unique_destination(output_dir, file_path)
             os.replace(temp_path, final_path)
-            if file_path.exists():
+            if file_path.exists() and _verify_same_file(file_path, original_stat):
                 file_path.unlink()
         else:
+            if not _verify_same_file(file_path, original_stat):
+                if temp_path.exists():
+                    temp_path.unlink()
+                logger(f"failed: {file_path} (file replaced during compression)")
+                return False
             final_path = file_path
             os.replace(temp_path, file_path)
         try:
@@ -638,8 +744,9 @@ def compress_all_mp4(
         for file_path in sorted(config.source_dir.rglob("*"))
         if file_path.is_file()
         and file_path.suffix.lower() == ".mp4"
-        and not file_path.name.lower().endswith("_temp_av1.mp4")
+        and "_temp_" not in file_path.stem
         and not is_compressed_output(file_path)
+        and SORTED_DIRS["low"] not in file_path.parts
     ]
     count = 0
     total = len(files)
@@ -647,6 +754,51 @@ def compress_all_mp4(
         codec = ffprobe_video_codec(file_path)
         should_run, reason = should_compress_codec(codec, config.codec_mode)
         if not should_run:
+            if reason == "already av1":
+                if config.keep_original:
+                    dst = compressed_companion_path(file_path, config.output_dir)
+                    if dst.exists():
+                        logger(f"skipped: {file_path} (companion exists: {dst.name})")
+                    else:
+                        if dry_run:
+                            logger(f"would copy (already av1): {file_path} -> {dst}")
+                        else:
+                            dst.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(file_path, dst)
+                            logger(f"copied (already av1): {file_path} -> {dst}")
+                elif config.output_dir != file_path.parent:
+                    dst = compressed_companion_path(file_path, config.output_dir)
+                    if dry_run:
+                        logger(f"would move (already av1): {file_path} -> {dst}")
+                    else:
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        if dst.exists():
+                            dup = _find_duplicate(config.output_dir, file_path)
+                            if dup is not None:
+                                file_path.unlink()
+                                new_path = dup
+                            else:
+                                new_path = unique_destination(config.output_dir, dst)
+                                try:
+                                    shutil.move(str(file_path), str(new_path))
+                                except OSError as exc:
+                                    logger(f"failed: {file_path} -> {new_path} ({exc})")
+                                    continue
+                        else:
+                            new_path = dst
+                            try:
+                                shutil.move(str(file_path), str(dst))
+                            except OSError as exc:
+                                logger(f"failed: {file_path} -> {dst} ({exc})")
+                                continue
+                        logger(f"moved (already av1): {file_path} -> {new_path}")
+                else:
+                    logger(f"skipped: {file_path} (already av1, in-place)")
+                    emit_progress(progress, idx, total, file_path.name)
+                    continue
+                count += 1
+                emit_progress(progress, idx, total, file_path.name)
+                continue
             logger(f"skipped: {file_path} ({reason or 'no match'})")
             emit_progress(progress, idx, total, file_path.name)
             continue
@@ -673,7 +825,10 @@ def compress_all_mp4(
 
 
 def hash_with_b3sum(file_path: Path) -> str:
-    proc = subprocess.run(["b3sum", "--no-names", str(file_path)], capture_output=True, text=True)
+    try:
+        proc = subprocess.run(["b3sum", "--no-names", str(file_path)], capture_output=True, text=True)
+    except FileNotFoundError:
+        raise RuntimeError("b3sum not found")
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or f"b3sum failed for {file_path}")
     return proc.stdout.strip()
@@ -686,19 +841,23 @@ def load_index(index_path: Path) -> dict[str, IndexEntry]:
     for raw in index_path.read_text(encoding="utf-8").splitlines():
         if not raw.strip():
             continue
-        parts = raw.split("\t", 3)
-        if len(parts) != 4:
+        if "\t" in raw:
+            parts = raw.split("\t", 3)
+            if len(parts) == 4:
+                blake3, size_s, mtime_s, rel = parts
+                try:
+                    entries[rel] = IndexEntry(path=rel, blake3=blake3, size=int(size_s), mtime_ns=int(mtime_s))
+                except ValueError:
+                    pass
             continue
-        blake3, size_s, mtime_s, rel = parts
-        try:
-            entries[rel] = IndexEntry(path=rel, blake3=blake3, size=int(size_s), mtime_ns=int(mtime_s))
-        except ValueError:
-            continue
+        m = re.match(r"^([0-9a-f]+)  +(.+)$", raw)
+        if m:
+            entries[m.group(2)] = IndexEntry(path=m.group(2), blake3=m.group(1), size=0, mtime_ns=0)
     return entries
 
 
 def write_index(index_path: Path, entries: dict[str, IndexEntry]) -> None:
-    lines = [f"{e.blake3}\t{e.size}\t{e.mtime_ns}\t{e.path}" for e in sorted(entries.values(), key=lambda x: x.path)]
+    lines = [f"{e.blake3}  {e.path}" for e in sorted(entries.values(), key=lambda x: x.path)]
     index_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
 
 
@@ -708,29 +867,45 @@ def sync_blake3_index(
     dry_run: bool = False,
     progress: ProgressCallback | None = None,
     index_path: Path | None = None,
+    scan_root: Path | None = None,
 ) -> int:
-    index_path = index_path or (root / INDEX_NAME)
+    if index_path is None:
+        scan_root = scan_root or root
+        index_path = scan_root / f"{scan_root.name}.b3"
     if not dry_run and not index_path.exists():
         index_path.parent.mkdir(parents=True, exist_ok=True)
         index_path.touch()
     existing = load_index(index_path)
     current: dict[str, IndexEntry] = {}
-    files = list(iter_files(root, include_managed=True))
+    scan_root = scan_root or root
+    files = list(iter_files(scan_root, include_managed=True, skip_names={index_path.name}))
+    would_index = 0
+    indexed = 0
     total = len(files)
     for idx, file_path in enumerate(files, start=1):
-        rel = file_path.relative_to(root).as_posix()
-        stat = file_path.stat()
+        rel = file_path.name
         cached = existing.get(rel)
-        if cached and cached.size == stat.st_size and cached.mtime_ns == stat.st_mtime_ns:
+        if cached:
             current[rel] = cached
+            if dry_run:
+                logger(f"  ok: {rel}")
+            emit_progress(progress, idx, total, rel)
+            continue
+        if dry_run:
+            would_index += 1
+            logger(f"  would index ({would_index}): {rel}")
             emit_progress(progress, idx, total, rel)
             continue
         digest = hash_with_b3sum(file_path)
-        current[rel] = IndexEntry(path=rel, blake3=digest, size=stat.st_size, mtime_ns=stat.st_mtime_ns)
-        logger(f"{'would index' if dry_run else 'indexed'}: {rel}")
+        current[rel] = IndexEntry(path=rel, blake3=digest, size=0, mtime_ns=0)
+        indexed += 1
+        logger(f"  indexed ({indexed}): {rel}")
         emit_progress(progress, idx, total, rel)
     if not dry_run:
         write_index(index_path, current)
+        logger(f"done: {indexed} indexed, {len(current)} total")
+    else:
+        logger(f"done: {would_index} would index, {total} total files")
     return len(current)
 
 
@@ -740,27 +915,59 @@ def full_pipeline(
     logger=print,
     dry_run: bool = False,
     progress: ProgressCallback | None = None,
+    file_progress: FileProgressCallback | None = None,
     keep_original: bool = True,
+    compress_source_dir: Path | None = None,
+    compress_output_dir: Path | None = None,
+    codec_mode: str = "non_av1",
+    index_scan_root: Path | None = None,
+    index_path: Path | None = None,
 ) -> None:
-    logger("step 1: filter low-quality videos")
-    filter_low_quality_videos(root, logger=logger, dry_run=dry_run, progress=progress)
-    logger("step 2: sort by extension")
-    sort_by_extension(root, logger=logger, dry_run=dry_run, progress=progress)
+    mp4_dir = root / SORTED_DIRS["mp4"]
+    src_dir = compress_source_dir or mp4_dir
+    out_dir = compress_output_dir or src_dir
+
+    totals = {}
+
+    logger("step 1: sort by extension")
+    totals["sorted"] = sort_by_extension(root, logger=logger, dry_run=dry_run, progress=progress)
+
+    logger("step 2: filter low-quality videos in MP4 folder")
+    totals["quarantined"] = filter_low_quality_videos(mp4_dir, logger=logger, dry_run=dry_run, progress=progress)
+
     logger(f"step 3: compress mp4 (keep_original={keep_original})")
-    compress_all_mp4(
+    totals["compressed"] = compress_all_mp4(
         CompressionConfig(
-            source_dir=root / SORTED_DIRS["mp4"],
-            output_dir=root / SORTED_DIRS["mp4"],
+            source_dir=src_dir,
+            output_dir=out_dir,
             keep_original=keep_original,
-            codec_mode="non_av1",
+            codec_mode=codec_mode,
         ),
         device=device,
         logger=logger,
         dry_run=dry_run,
         progress=progress,
+        file_progress=file_progress,
     )
-    logger("step 4: sync blake3 index")
-    sync_blake3_index(root, logger=logger, dry_run=dry_run, progress=progress)
+
+    logger("step 4: sync blake3 index on MP4 folder")
+    totals["indexed"] = sync_blake3_index(
+        root,
+        logger=logger,
+        dry_run=dry_run,
+        progress=progress,
+        scan_root=index_scan_root or out_dir,
+        index_path=index_path,
+    )
+
+    logger(f"=== pipeline summary: sorted={totals['sorted']} quarantined={totals['quarantined']} compressed={totals['compressed']} indexed={totals['indexed']} ===")
+
+
+def _safe_addstr(stdscr, y: int, x: int, text: str) -> None:
+    try:
+        stdscr.addstr(y, x, text)
+    except curses.error:
+        pass
 
 
 class TuiApp:
@@ -797,9 +1004,9 @@ class TuiApp:
         try:
             while True:
                 stdscr.clear()
-                stdscr.addstr(0, 0, title)
-                stdscr.addstr(1, 0, help_text)
-                stdscr.addstr(3, 0, "".join(buf))
+                _safe_addstr(stdscr, 0, 0, title)
+                _safe_addstr(stdscr, 1, 0, help_text)
+                _safe_addstr(stdscr, 3, 0, "".join(buf))
                 stdscr.move(3, pos)
                 stdscr.refresh()
                 try:
@@ -862,8 +1069,8 @@ class TuiApp:
         stdscr.clear()
         h, w = stdscr.getmaxyx()
         mode = "dry-run" if self.dry_run else "live"
-        stdscr.addstr(0, 0, f"Album TUI  root={self.root}  device={self.device}  mode={mode}")
-        stdscr.addstr(1, 0, "Up/Down to move, Enter to run, r to change root, q to quit")
+        _safe_addstr(stdscr, 0, 0, f"Album TUI  root={self.root}  device={self.device}  mode={mode}")
+        _safe_addstr(stdscr, 1, 0, "Up/Down to move, Enter to run, r to change root, q to quit")
         item_start = 3
         if self.progress is not None:
             p = self.progress
@@ -875,15 +1082,15 @@ class TuiApp:
                 file_current=p.file_current,
                 file_total=p.file_total,
             )
-            stdscr.addstr(2, 0, f"Progress: {bar[: max(0, w - 10)]}")
+            _safe_addstr(stdscr, 2, 0, f"Progress: {bar[: max(0, w - 10)]}")
             item_start = 4
         for i, item in enumerate(self.items):
             marker = ">" if i == self.selected else " "
-            stdscr.addstr(item_start + i, 0, f"{marker} {item}")
+            _safe_addstr(stdscr, item_start + i, 0, f"{marker} {item}")
         start = max(0, h - len(self.status) - 2)
-        stdscr.addstr(start, 0, "Logs:")
+        _safe_addstr(stdscr, start, 0, "Logs:")
         for idx, line in enumerate(self.status[-(h - start - 1):], start + 1):
-            stdscr.addstr(idx, 0, line[: max(0, w - 1)])
+            _safe_addstr(stdscr, idx, 0, line[: max(0, w - 1)])
         stdscr.refresh()
 
     def progress_cb(self, stdscr) -> ProgressCallback:
@@ -957,22 +1164,32 @@ class TuiApp:
                 )
                 self.log(f"done: {n} compressed")
             elif action == "Sync BLAKE3 index":
-                index_path = Path(self.prompt(stdscr, "Enter BLAKE3 index file path:", str(self.root / INDEX_NAME))).expanduser().resolve()
-                n = sync_blake3_index(self.root, logger=self.log, dry_run=self.dry_run, progress=progress, index_path=index_path)
+                index_path = Path(self.prompt(stdscr, "Enter BLAKE3 index file path:", str(self.root / f"{self.root.name}.b3"))).expanduser().resolve()
+                scan_root = Path(self.prompt(stdscr, "Enter directory to scan (leave empty for root):", str(self.root))).expanduser().resolve()
+                n = sync_blake3_index(self.root, logger=self.log, dry_run=self.dry_run, progress=progress, index_path=index_path, scan_root=scan_root)
                 self.log(f"done: {n} indexed")
             elif action == "Run full pipeline":
+                source_dir = Path(self.prompt(stdscr, "Enter source directory for compression:", str(self.root / SORTED_DIRS["mp4"]))).expanduser().resolve()
+                output_dir = Path(self.prompt(stdscr, "Enter output directory for compressed files:", str(source_dir))).expanduser().resolve()
                 keep_original = self.prompt_yes_no(
                     stdscr,
                     "Keep original files after compression?",
                     default=True,
                 )
+                index_scan_root = Path(self.prompt(stdscr, "Enter directory to scan for index (leave empty for root):", str(self.root))).expanduser().resolve()
+                index_path = Path(self.prompt(stdscr, "Enter BLAKE3 index file path:", str(self.root / f"{self.root.name}.b3"))).expanduser().resolve()
                 full_pipeline(
                     self.root,
                     self.device,
                     logger=self.log,
                     dry_run=self.dry_run,
                     progress=progress,
+                    file_progress=self.file_progress_cb(stdscr),
                     keep_original=keep_original,
+                    compress_source_dir=source_dir,
+                    compress_output_dir=output_dir,
+                    index_scan_root=index_scan_root,
+                    index_path=index_path,
                 )
                 self.log("done: pipeline finished")
             elif action == "Change root directory":
@@ -1010,9 +1227,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="/dev/dri/renderD128", help="VAAPI device path")
     parser.add_argument("--dry-run", action="store_true", help="preview changes without modifying files")
     parser.add_argument("--index-file", default=None, help="BLAKE3 index file path")
+    parser.add_argument("--index-scan-root", default=None, help="directory to scan for index (default: root)")
     parser.add_argument("--compress-source", default=None, help="compression source directory")
     parser.add_argument("--compress-output", default=None, help="compression output directory")
-    parser.add_argument("--keep-original", action="store_true", help="keep original files after compression")
+    parser.add_argument("--no-keep-original", action="store_false", dest="keep_original", default=True, help="delete original files after compression")
     parser.add_argument("--codec-mode", choices=("hevc_only", "non_av1"), default="non_av1", help="compression selection mode")
     sub = parser.add_subparsers(dest="cmd")
     sub.add_parser("tui", help="interactive terminal UI")
@@ -1060,14 +1278,24 @@ def main() -> int:
             )
         elif args.cmd == "index":
             index_path = Path(args.index_file).expanduser().resolve() if args.index_file else None
-            sync_blake3_index(root, dry_run=args.dry_run, progress=progress, index_path=index_path)
+            scan_root = Path(args.index_scan_root).expanduser().resolve() if args.index_scan_root else None
+            sync_blake3_index(root, dry_run=args.dry_run, progress=progress, index_path=index_path, scan_root=scan_root)
         elif args.cmd == "all":
+            index_scan_root = Path(args.index_scan_root).expanduser().resolve() if args.index_scan_root else None
+            index_path = Path(args.index_file).expanduser().resolve() if args.index_file else None
+            compress_source_dir = Path(args.compress_source).expanduser().resolve() if args.compress_source else None
+            compress_output_dir = Path(args.compress_output).expanduser().resolve() if args.compress_output else None
             full_pipeline(
                 root,
                 args.device,
                 dry_run=args.dry_run,
                 progress=progress,
                 keep_original=args.keep_original,
+                codec_mode=args.codec_mode,
+                compress_source_dir=compress_source_dir,
+                compress_output_dir=compress_output_dir,
+                index_scan_root=index_scan_root,
+                index_path=index_path,
             )
     finally:
         progress.finish()

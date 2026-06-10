@@ -1,0 +1,677 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Flow</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0a0a0b;
+    --surface: #141416;
+    --border: #222226;
+    --text: #e4e4e7;
+    --text-dim: #71717a;
+    --accent: #3b82f6;
+    --accent-hover: #60a5fa;
+    --success: #22c55e;
+    --warn: #f59e0b;
+    --radius: 8px;
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans SC", sans-serif;
+    --mono: "SF Mono", "Cascadia Code", "JetBrains Mono", ui-monospace, monospace;
+  }
+  html, body { height: 100%; background: var(--bg); color: var(--text); font: 14px/1.6 var(--font); }
+  body { display: flex; }
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  ::selection { background: var(--accent); color: #fff; }
+
+  .sidebar {
+    width: 260px; flex-shrink: 0;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    padding: 20px 12px;
+  }
+  .logo {
+    font-size: 20px; font-weight: 700;
+    padding: 0 12px 20px;
+    letter-spacing: -0.5px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .logo span { color: var(--accent); }
+  .nav { display: flex; flex-direction: column; gap: 4px; flex: 1; }
+  .nav-btn {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 12px; border-radius: var(--radius);
+    border: none; background: transparent;
+    color: var(--text-dim); font: 14px var(--font);
+    cursor: pointer; transition: all .15s; text-align: left;
+    width: 100%;
+  }
+  .nav-btn:hover { background: rgba(255,255,255,.05); color: var(--text); }
+  .nav-btn.active { background: rgba(59,130,246,.12); color: var(--accent); }
+  .nav-btn .icon { width: 20px; text-align: center; flex-shrink: 0; font-size: 16px; }
+  .nav-divider { height: 1px; background: var(--border); margin: 8px 12px; }
+  .sidebar-footer {
+    padding: 12px; font-size: 12px; color: var(--text-dim);
+    border-top: 1px solid var(--border);
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .sidebar-footer label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  .sidebar-footer input[type="checkbox"] { accent-color: var(--accent); }
+  .lang-btn {
+    background: transparent; border: 1px solid var(--border);
+    color: var(--text-dim); font: 12px var(--font);
+    padding: 4px 10px; border-radius: var(--radius);
+    cursor: pointer; transition: all .15s; text-align: center;
+  }
+  .lang-btn:hover { border-color: var(--accent); color: var(--accent-hover); }
+
+  .main {
+    flex: 1; display: flex; flex-direction: column;
+    min-width: 0;
+  }
+  .toolbar {
+    display: flex; align-items: center; gap: 12px;
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .toolbar .path { font-size: 13px; color: var(--text-dim); }
+  .toolbar .path code { color: var(--accent); }
+  .toolbar .actions { margin-left: auto; display: flex; gap: 8px; }
+
+  .btn {
+    padding: 7px 16px; border-radius: var(--radius);
+    border: 1px solid var(--border); background: var(--surface);
+    color: var(--text); font: 13px var(--font);
+    cursor: pointer; transition: all .15s;
+    white-space: nowrap;
+  }
+  .btn:hover { border-color: var(--accent); color: var(--accent-hover); }
+  .btn-primary {
+    background: var(--accent); border-color: var(--accent); color: #fff;
+  }
+  .btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); color: #fff; }
+  .btn-danger { background: #ef4444; border-color: #ef4444; color: #fff; }
+  .btn-danger:hover { background: #dc2626; border-color: #dc2626; color: #fff; }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+
+  .content {
+    flex: 1; padding: 24px; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 16px;
+  }
+
+  .progress-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 16px 20px;
+    display: none;
+  }
+  .progress-card.active { display: block; }
+  .progress-header { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 13px; }
+  .progress-bar-track {
+    height: 4px; background: var(--border); border-radius: 2px; overflow: hidden;
+  }
+  .progress-bar-fill {
+    height: 100%; background: var(--accent); border-radius: 2px;
+    transition: width .3s ease; width: 0%;
+  }
+  .progress-sub {
+    font-size: 12px; color: var(--text-dim); margin-top: 6px;
+  }
+  .progress-sub .sub-bar-track {
+    height: 3px; background: var(--border); border-radius: 2px; overflow: hidden; margin-top: 4px;
+  }
+  .progress-sub .sub-bar-fill {
+    height: 100%; background: var(--warn); border-radius: 2px;
+    transition: width .3s ease; width: 0%;
+  }
+
+  .log-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); overflow: hidden;
+    flex: 1; display: flex; flex-direction: column;
+  }
+  .log-header {
+    padding: 10px 16px; font-size: 12px; text-transform: uppercase;
+    letter-spacing: .5px; color: var(--text-dim);
+    border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .log-body {
+    padding: 12px 16px; font: 13px/1.7 var(--mono);
+    overflow-y: auto; flex: 1; min-height: 200px;
+    white-space: pre-wrap; word-break: break-all;
+  }
+  .log-body .log-line { padding: 1px 0; }
+  .log-body .log-line.info { color: var(--text); }
+  .log-body .log-line.error { color: #ef4444; font-weight: 600; }
+  .log-body .log-line.warn { color: var(--warn); }
+
+  .dialog-overlay {
+    display: none; position: fixed; inset: 0;
+    background: rgba(0,0,0,.6); z-index: 100;
+    align-items: center; justify-content: center;
+  }
+  .dialog-overlay.active { display: flex; }
+  .dialog {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 24px; width: 420px; max-width: 90vw;
+  }
+  .dialog h3 { font-size: 16px; margin-bottom: 16px; }
+  .dialog label { display: block; font-size: 13px; color: var(--text-dim); margin-bottom: 4px; }
+  .dialog input, .dialog select {
+    width: 100%; padding: 8px 12px; border-radius: var(--radius);
+    border: 1px solid var(--border); background: var(--bg);
+    color: var(--text); font: 13px var(--font); margin-bottom: 12px;
+  }
+  .dialog input:focus, .dialog select:focus { outline: none; border-color: var(--accent); }
+  .dialog .checkbox-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+  .dialog .checkbox-row input[type="checkbox"] { width: auto; margin: 0; accent-color: var(--accent); }
+  .dialog .btn-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
+
+  @media (max-width: 640px) {
+    body { flex-direction: column; }
+    .sidebar { width: 100%; padding: 12px; flex-direction: row; flex-wrap: wrap; border-right: none; border-bottom: 1px solid var(--border); }
+    .logo { padding: 0 12px 0 0; }
+    .nav { flex-direction: row; flex-wrap: wrap; gap: 2px; }
+    .nav-btn { padding: 6px 10px; font-size: 13px; }
+    .nav-divider { display: none; }
+    .sidebar-footer { display: none; }
+    .toolbar { flex-wrap: wrap; padding: 12px 16px; }
+    .content { padding: 16px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="sidebar">
+  <div class="logo">◆ <span>Flow</span></div>
+  <div class="nav">
+    <button class="nav-btn active" data-action="sort"><span class="icon">●</span><span data-i18n="sort">Sort by extension</span></button>
+    <button class="nav-btn" data-action="filter"><span class="icon">●</span><span data-i18n="filter">Filter low quality</span></button>
+    <button class="nav-btn" data-action="compress"><span class="icon">●</span><span data-i18n="compress">Compress MP4</span></button>
+    <button class="nav-btn" data-action="index"><span class="icon">●</span><span data-i18n="index">Sync BLAKE3 index</span></button>
+    <div class="nav-divider"></div>
+    <button class="nav-btn" data-action="pipeline"><span class="icon">▶</span><span data-i18n="pipeline">Full pipeline</span></button>
+  </div>
+  <div class="sidebar-footer">
+    <label><input type="checkbox" id="dryRun"> <span data-i18n="dryRun">Dry run</span></label>
+    <button class="lang-btn" id="langBtn">中文</button>
+  </div>
+</div>
+
+<div class="main">
+  <div class="toolbar">
+    <div class="path"><span data-i18n="root">Root:</span> <code id="rootPath">__ROOT__</code></div>
+    <div class="actions">
+      <button class="btn" id="changeRootBtn"><span data-i18n="changeRoot">Change root</span></button>
+      <button class="btn btn-primary" id="runBtn"><span data-i18n="run">Run</span></button>
+    </div>
+  </div>
+  <div class="content">
+    <div class="progress-card" id="progressCard">
+      <div class="progress-header">
+        <span id="progressLabel"><span data-i18n="progress">Progress</span></span>
+        <span id="progressCount">0 / 0</span>
+      </div>
+      <div class="progress-bar-track"><div class="progress-bar-fill" id="progressFill"></div></div>
+      <div class="progress-sub" id="progressSub">
+        <span id="progressDetail"></span>
+        <div class="sub-bar-track"><div class="sub-bar-fill" id="subProgressFill"></div></div>
+      </div>
+    </div>
+    <div class="log-card">
+      <div class="log-header">
+        <span data-i18n="output">Output</span>
+        <span><button class="btn" id="clearLogBtn" style="padding:2px 10px;font-size:12px;"><span data-i18n="clear">Clear</span></button></span>
+      </div>
+      <div class="log-body" id="logBody"></div>
+    </div>
+  </div>
+</div>
+
+<div class="dialog-overlay" id="rootDialog">
+  <div class="dialog">
+    <h3 data-i18n="changeRootTitle">Change root directory</h3>
+    <label data-i18n="path">Path</label>
+    <input type="text" id="rootInput" placeholder="/path/to/media">
+    <div class="btn-row">
+      <button class="btn" id="rootCancel"><span data-i18n="cancel">Cancel</span></button>
+      <button class="btn btn-primary" id="rootConfirm"><span data-i18n="confirm">Confirm</span></button>
+    </div>
+  </div>
+</div>
+
+<div class="dialog-overlay" id="compressDialog">
+  <div class="dialog">
+    <h3 data-i18n="compressTitle">Compress settings</h3>
+    <label data-i18n="sourceDir">Source directory</label>
+    <input type="text" id="compressSource" placeholder="/path/to/MP4">
+    <label data-i18n="outputDir">Output directory</label>
+    <input type="text" id="compressOutput" placeholder="/path/to/output">
+    <label data-i18n="codecMode">Codec mode</label>
+    <select id="compressCodec">
+      <option value="non_av1" data-i18n="compressAll">Compress all non-AV1 MP4</option>
+      <option value="hevc_only" data-i18n="hevcOnly">Only H265/HEVC -> AV1</option>
+    </select>
+    <div class="checkbox-row">
+      <input type="checkbox" id="compressKeep" checked>
+      <label style="margin:0" data-i18n="keepOriginals">Keep original files</label>
+    </div>
+    <div class="btn-row">
+      <button class="btn" id="compressCancel"><span data-i18n="cancel">Cancel</span></button>
+      <button class="btn btn-primary" id="compressConfirm"><span data-i18n="start">Start</span></button>
+    </div>
+  </div>
+</div>
+
+<div class="dialog-overlay" id="indexDialog">
+  <div class="dialog">
+    <h3 data-i18n="indexTitle">Index / Pipeline settings</h3>
+    <label data-i18n="scanRootDir">Scan directory (leave empty for root)</label>
+    <input type="text" id="indexScanRoot" placeholder="/path/to/scan">
+    <label data-i18n="indexFilePath">Index file path (auto-created if missing)</label>
+    <input type="text" id="indexFilePath" placeholder="/path/to/.b3">
+    <div class="btn-row">
+      <button class="btn" id="indexCancel"><span data-i18n="cancel">Cancel</span></button>
+      <button class="btn btn-primary" id="indexConfirm"><span data-i18n="start">Start</span></button>
+    </div>
+  </div>
+</div>
+
+<script>
+const translations = {
+  en: {
+    sort: "Sort by extension",
+    filter: "Filter low quality",
+    compress: "Compress MP4",
+    index: "Sync BLAKE3 index",
+    pipeline: "Full pipeline",
+    dryRun: "Dry run",
+    root: "Root:",
+    changeRoot: "Change root",
+    run: "Run",
+    cancelTask: "Cancel",
+    output: "Output",
+    clear: "Clear",
+    progress: "Progress",
+    processing: "Processing...",
+    compressing: "Compressing...",
+    changeRootTitle: "Change root directory",
+    path: "Path",
+    cancel: "Cancel",
+    confirm: "Confirm",
+    compressTitle: "Compress settings",
+    sourceDir: "Source directory",
+    outputDir: "Output directory",
+    codecMode: "Codec mode",
+    compressAll: "Compress all non-AV1 MP4",
+    hevcOnly: "Only H265/HEVC -> AV1",
+    keepOriginals: "Keep original files",
+    scanRoot: "Scan root (for index, leave empty for root)",
+    indexTitle: "Index / Pipeline settings",
+    scanRootDir: "Scan directory (leave empty for root)",
+    indexFilePath: "Index file path (auto-created if missing)",
+    start: "Start",
+    error: "Error:",
+    disconnected: "Connection lost, please refresh the page",
+    lang: "中文",
+  },
+  zh: {
+    sort: "按扩展名分类",
+    filter: "筛选低质量视频",
+    compress: "压缩 MP4",
+    index: "同步 BLAKE3 索引",
+    pipeline: "完整流程",
+    dryRun: "预览模式",
+    root: "根目录:",
+    changeRoot: "更改根目录",
+    run: "运行",
+    cancelTask: "取消任务",
+    output: "输出",
+    clear: "清空",
+    progress: "进度",
+    processing: "处理中...",
+    compressing: "压缩中...",
+    changeRootTitle: "更改根目录",
+    path: "路径",
+    cancel: "取消",
+    confirm: "确认",
+    compressTitle: "压缩设置",
+    sourceDir: "源目录",
+    outputDir: "输出目录",
+    codecMode: "编码模式",
+    compressAll: "压缩所有非 AV1 的 MP4",
+    hevcOnly: "仅 H265/HEVC -> AV1",
+    keepOriginals: "保留原始文件",
+    scanRoot: "扫描根目录（索引用，留空使用根目录）",
+    indexTitle: "索引 / 流程设置",
+    scanRootDir: "扫描目录（留空使用根目录）",
+    indexFilePath: "索引文件路径（不存在则自动创建）",
+    start: "开始",
+    error: "错误:",
+    disconnected: "连接已断开，请刷新页面",
+    lang: "English",
+  },
+};
+
+const state = {
+  root: "__ROOT__",
+  running: false,
+  action: "sort",
+  compressSource: "",
+  compressOutput: "",
+  compressKeep: true,
+  compressCodec: "non_av1",
+  scanRoot: "",
+  indexFile: "",
+  dryRun: false,
+  lang: "en",
+  _pipelinePending: false,
+};
+
+let evtSource = null;
+let evtReconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 10;
+
+const $ = s => document.querySelector(s);
+const $$ = s => document.querySelectorAll(s);
+
+function t(key) {
+  return translations[state.lang][key] || key;
+}
+
+function applyTranslation() {
+  document.querySelectorAll("[data-i18n]").forEach(el => {
+    const key = el.dataset.i18n;
+    if (el.tagName === "OPTION" || el.tagName === "BUTTON") {
+      const textNode = [...el.childNodes].find(n => n.nodeType === 3);
+      if (textNode) textNode.textContent = t(key);
+      else el.textContent = t(key);
+    } else {
+      el.textContent = t(key);
+    }
+  });
+  $("#langBtn").textContent = t("lang");
+}
+
+function toggleLang() {
+  state.lang = state.lang === "en" ? "zh" : "en";
+  applyTranslation();
+}
+
+$$(".nav-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    $$(".nav-btn").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    state.action = btn.dataset.action;
+  });
+});
+
+$("#dryRun").addEventListener("change", e => { state.dryRun = e.target.checked; });
+$("#langBtn").addEventListener("click", toggleLang);
+
+function classifyLogClass(msg) {
+  const body = msg.replace(/^\[[^\]]+\]\s/, "");
+  const lower = body.toLowerCase();
+  if (lower.startsWith("failed") || lower.includes("failed:")) return "error";
+  if (lower.startsWith("skipped:") || lower.startsWith("already") || lower.startsWith("output not smaller") || lower.startsWith("quarantined:") || lower.startsWith("warning:")) return "warn";
+  return "info";
+}
+function log(msg, cls) {
+  cls = cls || classifyLogClass(msg);
+  const el = document.createElement("div");
+  el.className = "log-line " + cls;
+  el.textContent = msg;
+  const body = $("#logBody");
+  body.appendChild(el);
+  body.scrollTop = body.scrollHeight;
+}
+$("#clearLogBtn").addEventListener("click", () => { $("#logBody").innerHTML = ""; });
+
+function setProgress(pct, label, count, detail, filePct) {
+  const card = $("#progressCard");
+  card.classList.add("active");
+  $("#progressFill").style.width = Math.min(pct, 100) + "%";
+  $("#progressLabel").textContent = label;
+  $("#progressCount").textContent = count;
+  const sub = $("#progressSub");
+  const subFill = $("#subProgressFill");
+  if (detail) {
+    sub.style.display = "block";
+    $("#progressDetail").textContent = detail;
+    subFill.style.width = Math.min(filePct || 0, 100) + "%";
+  } else {
+    sub.style.display = "none";
+  }
+}
+function hideProgress() {
+  $("#progressCard").classList.remove("active");
+}
+
+function updateUIForRunning(running) {
+  const btn = $("#runBtn");
+  if (running) {
+    btn.textContent = t("cancelTask");
+    btn.className = "btn btn-danger";
+  } else {
+    btn.innerHTML = '<span data-i18n="run">' + t("run") + '</span>';
+    btn.className = "btn btn-primary";
+  }
+  btn.disabled = false;
+  $$(".nav-btn").forEach(b => b.style.pointerEvents = running ? "none" : "");
+}
+
+function showDialog(id) { $(id).classList.add("active"); }
+function hideDialog(id) { $(id).classList.remove("active"); }
+
+$("#changeRootBtn").addEventListener("click", () => {
+  $("#rootInput").value = state.root;
+  showDialog("#rootDialog");
+});
+$("#rootCancel").addEventListener("click", () => hideDialog("#rootDialog"));
+$("#rootConfirm").addEventListener("click", () => {
+  const val = $("#rootInput").value.trim();
+  if (val) {
+    state.root = val;
+    $("#rootPath").textContent = val;
+  }
+  hideDialog("#rootDialog");
+});
+$("#rootInput").addEventListener("keydown", e => { if (e.key === "Enter") $("#rootConfirm").click(); });
+
+$("#runBtn").addEventListener("click", () => {
+  if (state.running) cancelAction();
+  else runAction();
+});
+
+async function cancelAction() {
+  state.running = false;
+  updateUIForRunning(false);
+  try {
+    const resp = await fetch("/api/cancel", { method: "POST" });
+    if (!resp.ok) { const e = await resp.text(); log(t("error") + " " + e, "error"); return; }
+    log("cancelling...", "warn");
+  } catch(e) {
+    log(t("error") + " " + e.message, "error");
+  }
+}
+
+async function runAction() {
+  if (state.running) return;
+  if (state.action === "compress") {
+    const src = state.compressSource || state.root + "/MP4";
+    const out = state.compressOutput || (src.replace(/\/+$/, '') + '_C');
+    $("#compressSource").value = src;
+    $("#compressOutput").value = out;
+    $("#compressCodec").value = state.compressCodec;
+    $("#compressKeep").checked = state.compressKeep;
+    state._pipelinePending = false;
+    showDialog("#compressDialog");
+    return;
+  }
+  if (state.action === "pipeline") {
+    const src = state.compressSource || state.root + "/MP4";
+    const out = state.compressOutput || (src.replace(/\/+$/, '') + '_C');
+    $("#compressSource").value = src;
+    $("#compressOutput").value = out;
+    $("#compressCodec").value = state.compressCodec;
+    $("#compressKeep").checked = state.compressKeep;
+    state._pipelinePending = true;
+    showDialog("#compressDialog");
+    return;
+  }
+  if (state.action === "index") {
+    const outDir = state.compressOutput || ((state.root.endsWith('/') ? state.root : state.root + '/') + 'MP4_C');
+    $("#indexScanRoot").value = state.scanRoot || outDir;
+    const dirName = outDir.split('/').filter(Boolean).pop() || 'index';
+    $("#indexFilePath").value = state.indexFile || outDir + '/' + dirName + '.b3';
+    state._pipelinePending = false;
+    showDialog("#indexDialog");
+    return;
+  }
+  await doRun(state.action);
+}
+
+$("#compressCancel").addEventListener("click", () => {
+  state._pipelinePending = false;
+  hideDialog("#compressDialog");
+});
+$("#compressConfirm").addEventListener("click", async () => {
+  state.compressSource = $("#compressSource").value.trim();
+  state.compressOutput = $("#compressOutput").value.trim();
+  state.compressCodec = $("#compressCodec").value;
+  state.compressKeep = $("#compressKeep").checked;
+  hideDialog("#compressDialog");
+  if (state._pipelinePending) {
+    state._pipelinePending = false;
+    const outDir = state.compressOutput || ((state.root.endsWith('/') ? state.root : state.root + '/') + 'MP4_C');
+    $("#indexScanRoot").value = state.scanRoot || outDir;
+    const dirName = outDir.split('/').filter(Boolean).pop() || 'index';
+    $("#indexFilePath").value = state.indexFile || outDir + '/' + dirName + '.b3';
+    showDialog("#indexDialog");
+    return;
+  }
+  await doRun("compress");
+});
+$("#compressDialog").addEventListener("keydown", e => {
+  if (e.key === "Enter" && $("#compressDialog").classList.contains("active")) $("#compressConfirm").click();
+});
+
+$("#indexCancel").addEventListener("click", () => hideDialog("#indexDialog"));
+$("#indexConfirm").addEventListener("click", async () => {
+  state.scanRoot = $("#indexScanRoot").value.trim();
+  state.indexFile = $("#indexFilePath").value.trim();
+  hideDialog("#indexDialog");
+  await doRun(state.action);
+});
+$("#indexDialog").addEventListener("keydown", e => {
+  if (e.key === "Enter" && $("#indexDialog").classList.contains("active")) $("#indexConfirm").click();
+});
+
+function connectSSE() {
+  if (evtSource) evtSource.close();
+  evtSource = new EventSource("/api/events");
+  evtSource.onmessage = (event) => {
+    evtReconnectAttempts = 0;
+    try {
+      const data = JSON.parse(event.data);
+      const type = data[0];
+      if (type === "sync") {
+        const s = data[1];
+        state.running = s.running;
+        updateUIForRunning(s.running);
+        s.logs.forEach(msg => log(msg));
+        if (s.running) {
+          const p = s.progress;
+          const pct = p.total > 0 ? (p.current / p.total) * 100 : 0;
+          setProgress(pct, t("processing"), p.current + " / " + p.total, "", 0);
+        } else {
+          hideProgress();
+          if (s.result === "done") log(t("done"), "info");
+          else if (s.result === "cancelled") log("cancelled", "warn");
+          else if (s.result === "error") log(t("error"), "error");
+        }
+      } else if (type === "log") {
+        log(data[1]);
+      } else if (type === "progress") {
+        const [, cur, total, detail] = data;
+        const pct = total > 0 ? (cur / total) * 100 : 0;
+        setProgress(pct, t("processing"), cur + " / " + total, detail, 0);
+      } else if (type === "file_progress") {
+        const [, cur, total, fcur, ftotal, detail] = data;
+        const pct = total > 0 ? (cur / total) * 100 : 0;
+        const fpct = ftotal > 0 ? (fcur / ftotal) * 100 : 0;
+        setProgress(pct, t("compressing"), cur + " / " + total, detail, fpct);
+      } else if (type === "done") {
+        log(t("done"), "info");
+        state.running = false;
+        updateUIForRunning(false);
+        hideProgress();
+      } else if (type === "cancelled") {
+        log("cancelled", "warn");
+        state.running = false;
+        updateUIForRunning(false);
+        hideProgress();
+      } else if (type === "error") {
+        log(t("error") + " " + data[1], "error");
+        state.running = false;
+        updateUIForRunning(false);
+        hideProgress();
+      }
+    } catch(e) { console.error(e); }
+  };
+  evtSource.onerror = () => {
+    evtSource.close();
+    evtSource = null;
+    evtReconnectAttempts++;
+    if (evtReconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+      log(t("disconnected"), "error");
+      if (!state.running) {
+        updateUIForRunning(false);
+        hideProgress();
+      }
+      return;
+    }
+    const delay = Math.min(1000 * Math.pow(2, evtReconnectAttempts - 1), 10000);
+    setTimeout(connectSSE, delay);
+  };
+}
+
+connectSSE();
+
+async function doRun(action) {
+  hideProgress();
+  log("--- " + action + " ---", "info");
+
+  const body = { action, root: state.root, dry_run: state.dryRun };
+  if (action === "compress" || action === "pipeline") {
+    body.source_dir = state.compressSource;
+    body.output_dir = state.compressOutput;
+    body.codec_mode = state.compressCodec;
+    body.keep_original = state.compressKeep;
+  }
+  if (action === "index" || action === "pipeline") {
+    body.scan_root = state.scanRoot || "";
+    body.index_file = state.indexFile || "";
+  }
+
+  try {
+    const resp = await fetch("/api/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) { const e = await resp.text(); log(t("error") + " " + e, "error"); return; }
+    state.running = true;
+    updateUIForRunning(true);
+  } catch(e) {
+    log(t("error") + " " + e.message, "error");
+  }
+}
+</script>
+</body>
+</html>
