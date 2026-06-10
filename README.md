@@ -168,12 +168,11 @@ media_root/
 FZY/
 ├── album_tui.py          # Core library + TUI + CLI (1259 lines)
 ├── webui.py              # HTTP server with SSE broadcasting (404 lines)
-├── index.html            # Web UI frontend (677 lines)
-└── Test/                 # Sample data & test logs
+└── index.html            # Web UI frontend (677 lines)
 ```
 
 Zero external Python packages — standard library only.
 
 ## License
 
-MIT
+Apache 2.0
